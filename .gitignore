@@ -216,3 +216,27 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# Data and models — NEVER commit these
+data/
+*.faiss
+*.npy
+*.pkl
+*.pth
+*.bin
+
+# Notebooks output (cleanup before commit)
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.pyc
+.env
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
