@@ -240,3 +240,4 @@ venv/
 
 # OS
 .DS_Store
+local_data
