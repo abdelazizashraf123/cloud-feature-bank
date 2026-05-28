@@ -1,13 +1,3 @@
----
-title: Cloud Feature Bank API
-emoji: 🔍
-colorFrom: blue
-colorTo: purple
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # Cloud Feature Bank API
 
 REST API serving precomputed DINOv2 features for CIFAR-100, indexed with FAISS for nearest-neighbor retrieval.
