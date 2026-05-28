@@ -1,127 +1,7 @@
-﻿# """Service layer: DINOv2 feature extraction + FAISS retrieval."""
+﻿"""Service layer: DINOv2 feature extraction + FAISS retrieval.
 
-# import json
-# import time
-# from pathlib import Path
-
-# import numpy as np
-# import torch
-# import faiss
-# from PIL import Image
-# from transformers import AutoImageProcessor, AutoModel
-
-
-# class FeatureBankService:
-#     """Loads model and FAISS index once, serves queries."""
-
-#     def __init__(self, data_dir: str = "local_data"):
-#         self.data_dir = Path(data_dir)
-#         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-
-#         print(f"[init] Using device: {self.device}")
-#         self._load_metadata()
-#         self._load_model()
-#         self._load_index()
-#         print("[init] Service ready.")
-
-#     def _load_metadata(self):
-#         """Load metadata JSON and train labels."""
-#         meta_path = self.data_dir / "cifar100_vits14_metadata.json"
-#         labels_path = self.data_dir / "cifar100_vits14_train_labels.npy"
-
-#         with open(meta_path) as f:
-#             self.metadata = json.load(f)
-
-#         self.train_labels = np.load(labels_path)
-#         self.class_names = self.metadata["class_names"]
-#         self.model_name = self.metadata["model"]
-#         self.feature_dim = self.metadata["feature_dim"]
-#         self.dataset_name = self.metadata["dataset"]
-
-#         print(f"[init] Metadata loaded: {self.dataset_name}, "
-#               f"{len(self.class_names)} classes, dim={self.feature_dim}")
-
-#     def _load_model(self):
-#         """Load DINOv2 model and processor."""
-#         print(f"[init] Loading model: {self.model_name}")
-#         t0 = time.time()
-#         self.processor = AutoImageProcessor.from_pretrained(self.model_name)
-#         self.model = AutoModel.from_pretrained(self.model_name).to(self.device).eval()
-#         print(f"[init] Model loaded in {time.time()-t0:.1f}s")
-
-#     def _load_index(self):
-#         """Load FAISS index from disk."""
-#         index_path = self.data_dir / "cifar100_vits14.faiss"
-#         print(f"[init] Loading FAISS index from {index_path}")
-#         t0 = time.time()
-#         self.index = faiss.read_index(str(index_path))
-#         print(f"[init] Index loaded in {time.time()-t0:.2f}s, "
-#               f"{self.index.ntotal} vectors")
-
-#     def extract_features(self, image: Image.Image) -> tuple[np.ndarray, float]:
-#         """Run DINOv2 on a PIL image. Returns (features, time_ms)."""
-#         t0 = time.time()
-#         inputs = self.processor(images=image, return_tensors="pt").to(self.device)
-#         with torch.no_grad():
-#             outputs = self.model(**inputs)
-#         # CLS token = global feature
-#         features = outputs.last_hidden_state[:, 0, :].cpu().numpy().astype("float32")
-#         elapsed_ms = (time.time() - t0) * 1000
-#         return features, elapsed_ms
-
-#     def retrieve(self, image: Image.Image, k: int = 20) -> dict:
-#         """Extract features and search for K nearest neighbors."""
-#         # 1. Feature extraction
-#         features, infer_ms = self.extract_features(image)
-
-#         # 2. Normalize for cosine similarity
-#         features_norm = features.copy()
-#         faiss.normalize_L2(features_norm)
-
-#         # 3. FAISS search
-#         t0 = time.time()
-#         similarities, indices = self.index.search(features_norm, k)
-#         search_ms = (time.time() - t0) * 1000
-
-#         # 4. Build neighbor list
-#         neighbors = []
-#         for idx, sim in zip(indices[0], similarities[0]):
-#             label = int(self.train_labels[idx])
-#             neighbors.append({
-#                 "index": int(idx),
-#                 "label": label,
-#                 "class_name": self.class_names[label],
-#                 "similarity": float(sim),
-#             })
-
-#         # 5. Predict via majority vote
-#         neighbor_labels = [n["label"] for n in neighbors]
-#         predicted_label = int(np.bincount(neighbor_labels).argmax())
-
-#         return {
-#             "feature_dim": features.shape[1],
-#             "features": features[0].tolist(),
-#             "neighbors": neighbors,
-#             "predicted_label": predicted_label,
-#             "predicted_class": self.class_names[predicted_label],
-#             "inference_time_ms": round(infer_ms, 2),
-#             "search_time_ms": round(search_ms, 2),
-#         }
-
-#     def health_info(self) -> dict:
-#         """Service health info."""
-#         return {
-#             "status": "ok",
-#             "model": self.model_name,
-#             "dataset": self.dataset_name,
-#             "num_indexed": int(self.index.ntotal),
-#             "feature_dim": int(self.feature_dim),
-#             "device": self.device,
-#         }
-
-"""Service layer: DINOv2 feature extraction + FAISS retrieval.
-
-Loads model and FAISS index from Hugging Face Hub at startup.
+Supports multiple model sizes (ViT-S/B/L) loaded simultaneously.
+Model selection is per-request via the 'model' parameter.
 """
 
 import json
@@ -137,139 +17,160 @@ from transformers import AutoImageProcessor, AutoModel
 from huggingface_hub import hf_hub_download
 
 
-# Hugging Face dataset repo containing precomputed features
 DATASET_REPO = os.getenv("DATASET_REPO", "abdelazizashraf/cifar100-dinov2-features")
 
-# File names within the dataset repo
-INDEX_FILENAME = "cifar100_vits14.faiss"
-METADATA_FILENAME = "cifar100_vits14_metadata.json"
-LABELS_FILENAME = "cifar100_vits14_train_labels.npy"
+# Model registry: short_name -> HF model id
+MODEL_REGISTRY = {
+    "vits14": "facebook/dinov2-small",
+    "vitb14": "facebook/dinov2-base",
+    "vitl14": "facebook/dinov2-large",
+}
+
+DEFAULT_MODEL = "vits14"
 
 
 class FeatureBankService:
-    """Loads model and FAISS index once, serves queries."""
+    """Loads all DINOv2 models + FAISS indexes once, serves queries."""
 
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"[init] Using device: {self.device}")
 
-        self._download_files()
-        self._load_metadata()
-        self._load_model()
-        self._load_index()
+        # Storage for each model variant
+        self.models = {}       # short_name -> (processor, model)
+        self.indexes = {}      # short_name -> faiss index
+        self.metadata = {}     # short_name -> dict
+        self.train_labels = {} # short_name -> numpy array
 
+        # Load all 3 variants
+        for short_name, hf_model_id in MODEL_REGISTRY.items():
+            self._load_variant(short_name, hf_model_id)
+
+        # Use ViT-S metadata as "default" info source
+        self.default_model = DEFAULT_MODEL
+        print(f"[init] All variants loaded. Default: {self.default_model}")
         print("[init] Service ready.")
 
-    def _download_files(self):
-        """Download FAISS files from HF Hub (cached locally after first run)."""
-        print(f"[init] Fetching files from HF Hub: {DATASET_REPO}")
+    def _load_variant(self, short_name: str, hf_model_id: str):
+        """Load one model variant: model weights + FAISS index + labels."""
+        print(f"\n[init] Loading variant: {short_name} ({hf_model_id})")
         t0 = time.time()
 
-        self.index_path = hf_hub_download(
+        # Download files
+        index_path = hf_hub_download(
             repo_id=DATASET_REPO,
-            filename=INDEX_FILENAME,
+            filename=f"cifar100_{short_name}.faiss",
             repo_type="dataset",
         )
-        self.metadata_path = hf_hub_download(
+        meta_path = hf_hub_download(
             repo_id=DATASET_REPO,
-            filename=METADATA_FILENAME,
+            filename=f"cifar100_{short_name}_metadata.json",
             repo_type="dataset",
         )
-        self.labels_path = hf_hub_download(
+        labels_path = hf_hub_download(
             repo_id=DATASET_REPO,
-            filename=LABELS_FILENAME,
+            filename=f"cifar100_{short_name}_train_labels.npy",
             repo_type="dataset",
         )
 
-        print(f"[init] Files ready in {time.time()-t0:.1f}s")
+        # Load metadata + labels
+        with open(meta_path) as f:
+            self.metadata[short_name] = json.load(f)
+        self.train_labels[short_name] = np.load(labels_path)
 
-    def _load_metadata(self):
-        """Load metadata JSON and train labels."""
-        with open(self.metadata_path) as f:
-            self.metadata = json.load(f)
+        # Load FAISS
+        self.indexes[short_name] = faiss.read_index(str(index_path))
 
-        self.train_labels = np.load(self.labels_path)
-        self.class_names = self.metadata["class_names"]
-        self.model_name = self.metadata["model"]
-        self.feature_dim = self.metadata["feature_dim"]
-        self.dataset_name = self.metadata["dataset"]
+        # Load model
+        processor = AutoImageProcessor.from_pretrained(hf_model_id)
+        model = AutoModel.from_pretrained(hf_model_id).to(self.device).eval()
+        self.models[short_name] = (processor, model)
 
-        print(f"[init] Metadata: {self.dataset_name}, "
-              f"{len(self.class_names)} classes, dim={self.feature_dim}")
+        dim = self.metadata[short_name]["feature_dim"]
+        n = self.indexes[short_name].ntotal
+        print(f"[init] {short_name}: dim={dim}, vectors={n}, "
+              f"loaded in {time.time()-t0:.1f}s")
 
-    def _load_model(self):
-        """Load DINOv2 model and processor from HF Hub."""
-        print(f"[init] Loading model: {self.model_name}")
+    def extract_features(self, image: Image.Image, model_name: str) -> tuple[np.ndarray, float]:
+        """Run a specific DINOv2 variant on a PIL image."""
+        if model_name not in self.models:
+            raise ValueError(f"Unknown model: {model_name}. "
+                             f"Available: {list(self.models.keys())}")
+        processor, model = self.models[model_name]
+
         t0 = time.time()
-        self.processor = AutoImageProcessor.from_pretrained(self.model_name)
-        self.model = AutoModel.from_pretrained(self.model_name).to(self.device).eval()
-        print(f"[init] Model loaded in {time.time()-t0:.1f}s")
-
-    def _load_index(self):
-        """Load FAISS index from local path (already downloaded)."""
-        print(f"[init] Loading FAISS index")
-        t0 = time.time()
-        self.index = faiss.read_index(str(self.index_path))
-        print(f"[init] Index loaded in {time.time()-t0:.2f}s, "
-              f"{self.index.ntotal} vectors")
-
-    def extract_features(self, image: Image.Image) -> tuple[np.ndarray, float]:
-        """Run DINOv2 on a PIL image. Returns (features, time_ms)."""
-        t0 = time.time()
-        inputs = self.processor(images=image, return_tensors="pt").to(self.device)
+        inputs = processor(images=image, return_tensors="pt").to(self.device)
         with torch.no_grad():
-            outputs = self.model(**inputs)
-        # CLS token = global feature
+            outputs = model(**inputs)
         features = outputs.last_hidden_state[:, 0, :].cpu().numpy().astype("float32")
         elapsed_ms = (time.time() - t0) * 1000
         return features, elapsed_ms
 
-    def retrieve(self, image: Image.Image, k: int = 20) -> dict:
-        """Extract features and search for K nearest neighbors."""
-        # 1. Feature extraction
-        features, infer_ms = self.extract_features(image)
+    def retrieve(self, image: Image.Image, k: int = 20,
+                 model_name: str = None) -> dict:
+        """Extract features with chosen model and search its FAISS index."""
+        if model_name is None:
+            model_name = self.default_model
+        if model_name not in self.models:
+            raise ValueError(f"Unknown model: {model_name}. "
+                             f"Available: {list(self.models.keys())}")
 
-        # 2. Normalize for cosine similarity
+        # 1. Feature extraction
+        features, infer_ms = self.extract_features(image, model_name)
+
+        # 2. Normalize
         features_norm = features.copy()
         faiss.normalize_L2(features_norm)
 
-        # 3. FAISS search
+        # 3. FAISS search (in the matching index)
+        index = self.indexes[model_name]
+        train_labels = self.train_labels[model_name]
+        class_names = self.metadata[model_name]["class_names"]
+
         t0 = time.time()
-        similarities, indices = self.index.search(features_norm, k)
+        similarities, indices = index.search(features_norm, k)
         search_ms = (time.time() - t0) * 1000
 
         # 4. Build neighbor list
         neighbors = []
         for idx, sim in zip(indices[0], similarities[0]):
-            label = int(self.train_labels[idx])
+            label = int(train_labels[idx])
             neighbors.append({
                 "index": int(idx),
                 "label": label,
-                "class_name": self.class_names[label],
+                "class_name": class_names[label],
                 "similarity": float(sim),
             })
 
-        # 5. Predict via majority vote
+        # 5. Majority vote prediction
         neighbor_labels = [n["label"] for n in neighbors]
         predicted_label = int(np.bincount(neighbor_labels).argmax())
 
         return {
+            "model": model_name,
             "feature_dim": features.shape[1],
             "features": features[0].tolist(),
             "neighbors": neighbors,
             "predicted_label": predicted_label,
-            "predicted_class": self.class_names[predicted_label],
+            "predicted_class": class_names[predicted_label],
             "inference_time_ms": round(infer_ms, 2),
             "search_time_ms": round(search_ms, 2),
         }
 
     def health_info(self) -> dict:
         """Service health info."""
+        variants_info = {}
+        for short_name in self.models:
+            variants_info[short_name] = {
+                "model_id": MODEL_REGISTRY[short_name],
+                "feature_dim": self.metadata[short_name]["feature_dim"],
+                "num_indexed": int(self.indexes[short_name].ntotal),
+            }
         return {
             "status": "ok",
-            "model": self.model_name,
-            "dataset": self.dataset_name,
-            "num_indexed": int(self.index.ntotal),
-            "feature_dim": int(self.feature_dim),
             "device": self.device,
+            "default_model": self.default_model,
+            "available_models": list(self.models.keys()),
+            "variants": variants_info,
+            "dataset": "CIFAR-100",
         }

@@ -4,13 +4,14 @@ from typing import List
 from pydantic import BaseModel, Field
 
 
-class Neighbor(BaseModel):
-    """A single retrieved neighbor."""
-    index: int = Field(..., description="Position of the image in the dataset")
-    label: int = Field(..., description="Class label (integer)")
-    class_name: str = Field(..., description="Human-readable class name")
-    similarity: float = Field(..., description="Cosine similarity score")
+from typing import List, Dict, Any
 
+
+class Neighbor(BaseModel):
+    index: int
+    label: int
+    class_name: str
+    similarity: float
 
 class ExtractResponse(BaseModel):
     """Response for /extract endpoint."""
